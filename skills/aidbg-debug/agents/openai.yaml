@@ -1,0 +1,4 @@
+interface:
+  display_name: "aidbg Debug"
+  short_description: "Debug programs through a compact DAP CLI"
+  default_prompt: "Use aidbg to investigate this runtime problem with debugger evidence."

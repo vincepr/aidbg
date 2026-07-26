@@ -1,0 +1,28 @@
+{
+  "id": "netcoredbg",
+  "commandCandidates": [
+    "%AIDBG_NETCOREDBG%",
+    "netcoredbg",
+    "%LOCALAPPDATA%/csdbg/backends/netcoredbg/*/netcoredbg/netcoredbg.exe",
+    "~/.local/share/csdbg/backends/netcoredbg/*/netcoredbg/netcoredbg"
+  ],
+  "arguments": [
+    "--interpreter=vscode"
+  ],
+  "initialize": {
+    "clientID": "aidbg",
+    "clientName": "aidbg",
+    "adapterID": "coreclr",
+    "pathFormat": "path",
+    "linesStartAt1": true,
+    "columnsStartAt1": true,
+    "supportsVariableType": true,
+    "supportsVariablePaging": true,
+    "supportsRunInTerminalRequest": false,
+    "locale": "en-US"
+  },
+  "launchDefaults": {
+    "stopAtEntry": false,
+    "justMyCode": false
+  }
+}

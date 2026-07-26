@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aidbg"
+version = "0.1.0"
+description = "Compact interactive DAP client for coding agents"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+aidbg = "aidbg.cli:main"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
