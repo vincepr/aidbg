@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .aidbg/
 .venv/
+.mypy_cache/
 build/
 dist/
 *.egg-info/

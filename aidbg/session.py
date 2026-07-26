@@ -33,7 +33,7 @@ class DebugSession:
         trace_directory: Path,
     ) -> "DebugSession":
         """Start and initialize an adapter."""
-        client = DapClient(profile, trace_directory)
+        client = await asyncio.to_thread(DapClient, profile, trace_directory)
         try:
             await client.request("initialize", profile.initialize)
             return cls(profile, client, trace_directory)
