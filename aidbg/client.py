@@ -13,6 +13,7 @@ from typing import BinaryIO, cast
 
 from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject, JsonValue, read_message, write_message
+from aidbg.lifecycle import SessionLimits, start_owned_process
 
 
 class DapRequestError(RuntimeError):
@@ -38,6 +39,7 @@ class DapClient:
         self,
         profile: AdapterProfile,
         trace_directory: Path,
+        limits: SessionLimits,
     ) -> None:
         trace_directory.mkdir(parents=True, exist_ok=True)
         self.trace_path = trace_directory / "dap.jsonl"
@@ -49,12 +51,10 @@ class DapClient:
         self._events: Queue[JsonObject | BaseException] = Queue()
         self._sequence = 0
         self._closed = False
-        self._process = subprocess.Popen(
-            [str(profile.resolve_command()), *profile.arguments],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
+        self._close_lock = threading.Lock()
+        self._limits = limits
+        self._process, self._process_tree = start_owned_process(
+            [str(profile.resolve_command()), *profile.arguments]
         )
         if (
             self._process.stdin is None
@@ -79,12 +79,12 @@ class DapClient:
         self,
         command: str,
         arguments: JsonObject | None = None,
-        timeout: float = 30,
+        timeout: float | None = None,
     ) -> JsonObject:
         """Send one request and return its successful response."""
         response = await self.wait_response(
             self.send_request(command, arguments),
-            timeout,
+            timeout or self._limits.request_seconds,
         )
         if response.get("success") is not True:
             raise DapRequestError(command, response)
@@ -121,13 +121,13 @@ class DapClient:
     async def wait_response(
         self,
         completion: Future[JsonObject],
-        timeout: float = 30,
+        timeout: float | None = None,
     ) -> JsonObject:
         """Await a response future without blocking the event loop."""
         try:
             return await asyncio.wait_for(
                 asyncio.wrap_future(completion),
-                timeout,
+                timeout or self._limits.request_seconds,
             )
         except TimeoutError as error:
             raise TimeoutError("timed out waiting for DAP response") from error
@@ -135,10 +135,11 @@ class DapClient:
     async def wait_event(
         self,
         names: Collection[str],
-        timeout: float = 30,
+        timeout: float | None = None,
     ) -> JsonObject:
         """Wait for the next event matching one of ``names``."""
-        deadline = time.monotonic() + timeout
+        effective_timeout = timeout or self._limits.request_seconds
+        deadline = time.monotonic() + effective_timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -163,23 +164,24 @@ class DapClient:
 
     def close(self) -> None:
         """Terminate the adapter and close the trace."""
-        if self._closed:
-            return
-        self._closed = True
-        if self._process.stdin is not None:
-            self._process.stdin.close()
-        try:
-            self._process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=2)
-        self._reader.join(timeout=2)
-        self._stderr_reader.join(timeout=2)
-        if self._process.stdout is not None:
-            self._process.stdout.close()
-        if self._process.stderr is not None:
-            self._process.stderr.close()
-        self._trace.close()
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+            try:
+                self._process.wait(timeout=self._limits.shutdown_seconds)
+            except subprocess.TimeoutExpired:
+                pass
+            self._process_tree.kill(self._limits.shutdown_seconds)
+            self._reader.join(timeout=self._limits.shutdown_seconds)
+            self._stderr_reader.join(timeout=self._limits.shutdown_seconds)
+            if self._process.stdout is not None:
+                self._process.stdout.close()
+            if self._process.stderr is not None:
+                self._process.stderr.close()
+            self._trace.close()
 
     def _write(self, direction: str, message: JsonObject) -> None:
         if self._process.stdin is None:

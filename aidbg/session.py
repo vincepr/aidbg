@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aidbg.client import DapClient, DapRequestError
 from aidbg.commands import Breakpoint
+from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject
 
@@ -17,6 +18,7 @@ class DebugSession:
         profile: AdapterProfile,
         client: DapClient,
         trace_directory: Path,
+        limits: SessionLimits,
     ) -> None:
         self._profile = profile
         self._client = client
@@ -25,18 +27,26 @@ class DebugSession:
         self._thread_id: int | None = None
         self._exit_code: int | None = None
         self.trace_directory = trace_directory
+        self._limits = limits
 
     @classmethod
     async def create(
         cls,
         profile: AdapterProfile,
         trace_directory: Path,
+        limits: SessionLimits | None = None,
     ) -> "DebugSession":
         """Start and initialize an adapter."""
-        client = await asyncio.to_thread(DapClient, profile, trace_directory)
+        effective_limits = limits or SessionLimits()
+        client = await asyncio.to_thread(
+            DapClient,
+            profile,
+            trace_directory,
+            effective_limits,
+        )
         try:
             await client.request("initialize", profile.initialize)
-            return cls(profile, client, trace_directory)
+            return cls(profile, client, trace_directory, effective_limits)
         except Exception:
             client.close()
             raise
@@ -218,6 +228,12 @@ class DebugSession:
                 pass
         await asyncio.to_thread(self._client.close)
 
+    def force_close(self) -> None:
+        """Synchronously kill the adapter tree for hard lease enforcement."""
+        self._state = "terminated"
+        self._thread_id = None
+        self._client.close()
+
     @property
     def adapter_reaped(self) -> bool:
         """Whether the owned adapter process has exited."""
@@ -247,7 +263,7 @@ class DebugSession:
     async def _wait_execution(self) -> JsonObject:
         message = await self._client.wait_event(
             {"stopped", "terminated", "exited"},
-            timeout=120,
+            timeout=self._limits.execution_seconds,
         )
         event = message.get("event")
         body = message.get("body")

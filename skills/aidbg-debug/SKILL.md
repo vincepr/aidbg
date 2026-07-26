@@ -8,7 +8,7 @@ description: Debug runtime failures through the compact, debugger-independent ai
 Start one isolated session per agent:
 
 ```powershell
-python -m aidbg.cli --profile adapters/netcoredbg.json --trace-dir .aidbg/sessions/<id>
+python -m aidbg.cli --profile adapters/netcoredbg.json
 ```
 
 1. Build the target with matching symbols.
@@ -25,6 +25,9 @@ Use `--frame ID` with `scopes`, `locals`, or `eval` when the value belongs to a
 caller. If an adapter rejects lambdas or method-heavy expressions, use direct
 property/index evaluation and follow `variablesReference` values. Stop once
 runtime evidence decisively distinguishes the root cause from competing causes.
+
+Each CLI owns one adapter tree and a unique trace directory. The default hard
+session lease is 24 hours; choose a shorter `--session-timeout` when practical.
 
 Run `help` for the command list. Read [setup.md](references/setup.md) only when
 the adapter or prerequisites are unavailable.

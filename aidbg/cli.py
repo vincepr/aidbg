@@ -2,12 +2,17 @@
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
+import secrets
+import threading
 import traceback
 
 from aidbg.commands import Breakpoint, parse_breakpoint, tokenize
+from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonValue
 from aidbg.session import DebugSession
@@ -21,10 +26,17 @@ HELP = (
 )
 
 
-async def run(profile_path: Path, trace_directory: Path) -> int:
+async def run(
+    profile_path: Path,
+    trace_directory: Path,
+    limits: SessionLimits,
+    session_timeout: float,
+) -> int:
     """Run one persistent interactive debugger session."""
     profile = AdapterProfile.load(profile_path)
-    session = await DebugSession.create(profile, trace_directory)
+    session = await DebugSession.create(profile, trace_directory, limits)
+    lease = HardSessionLease(session, session_timeout)
+    lease.start()
     emit(
         {
             "ok": True,
@@ -63,6 +75,7 @@ async def run(profile_path: Path, trace_directory: Path) -> int:
                     }
                 )
     finally:
+        lease.cancel()
         await session.close()
 
 
@@ -226,26 +239,92 @@ def record_error(trace_directory: Path, error: BaseException) -> None:
         traceback.print_exception(error, file=stream)
 
 
+def default_trace_directory() -> Path:
+    """Return a collision-resistant per-process trace directory."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return Path(
+        ".aidbg",
+        "sessions",
+        f"{timestamp}-{os.getpid()}-{secrets.token_hex(4)}",
+    )
+
+
+class HardSessionLease:
+    """Force cleanup and process exit when a CLI session exceeds its lease."""
+
+    def __init__(self, session: DebugSession, timeout: float) -> None:
+        if timeout <= 0:
+            raise ValueError("session timeout must be positive")
+        self._session = session
+        self._timeout = timeout
+        self._cancelled = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="aidbg-hard-session-lease",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        """Start the hard lease."""
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Disarm the lease."""
+        self._cancelled.set()
+
+    def _run(self) -> None:
+        if self._cancelled.wait(self._timeout):
+            return
+        self._session.force_close()
+        payload = json.dumps(
+            {
+                "ok": False,
+                "error": "SessionTimeout",
+                "message": f"hard session timeout after {self._timeout:g}s",
+                "traceDirectory": str(self._session.trace_directory.resolve()),
+                "adapterReaped": self._session.adapter_reaped,
+            },
+            separators=(",", ":"),
+        )
+        try:
+            os.write(1, f"\n{payload}\n".encode())
+        finally:
+            os._exit(124)
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Compact interactive DAP client")
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument(
-        "--trace-dir",
-        type=Path,
-        default=Path(".aidbg", "sessions", "latest"),
-    )
+    parser.add_argument("--trace-dir", type=Path)
+    parser.add_argument("--request-timeout", type=float, default=30)
+    parser.add_argument("--execution-timeout", type=float, default=120)
+    parser.add_argument("--shutdown-timeout", type=float, default=3)
+    parser.add_argument("--session-timeout", type=float, default=24 * 60 * 60)
     arguments = parser.parse_args()
+    trace_directory = arguments.trace_dir or default_trace_directory()
+    limits = SessionLimits(
+        request_seconds=arguments.request_timeout,
+        execution_seconds=arguments.execution_timeout,
+        shutdown_seconds=arguments.shutdown_timeout,
+    )
     try:
-        exit_code = asyncio.run(run(arguments.profile, arguments.trace_dir))
+        exit_code = asyncio.run(
+            run(
+                arguments.profile,
+                trace_directory,
+                limits,
+                arguments.session_timeout,
+            )
+        )
     except Exception as error:
-        record_error(arguments.trace_dir, error)
+        record_error(trace_directory, error)
         emit(
             {
                 "ok": False,
                 "error": type(error).__name__,
                 "message": str(error),
-                "traceDirectory": str(arguments.trace_dir.resolve()),
+                "traceDirectory": str(trace_directory.resolve()),
             }
         )
         raise SystemExit(1) from None
