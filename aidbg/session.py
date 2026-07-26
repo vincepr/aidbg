@@ -23,6 +23,7 @@ class DebugSession:
         self._breakpoints: list[Breakpoint] = []
         self._state = "idle"
         self._thread_id: int | None = None
+        self._exit_code: int | None = None
         self.trace_directory = trace_directory
 
     @classmethod
@@ -114,11 +115,17 @@ class DebugSession:
         frames = _body_objects(response, "stackFrames")
         return frames[:levels]
 
-    async def scopes(self) -> list[JsonObject]:
-        """Return scopes for the top frame."""
+    async def scopes(self, frame_id: int | None = None) -> list[JsonObject]:
+        """Return scopes for a frame, defaulting to the top frame."""
         response = await self._client.request(
             "scopes",
-            {"frameId": await self._top_frame_id()},
+            {
+                "frameId": (
+                    frame_id
+                    if frame_id is not None
+                    else await self._top_frame_id()
+                )
+            },
         )
         return _body_objects(response, "scopes")
 
@@ -139,9 +146,13 @@ class DebugSession:
         )
         return _body_objects(response, "variables")[:count]
 
-    async def locals(self, count: int = 50) -> list[JsonObject]:
-        """Return a bounded page of locals from the top frame."""
-        for scope in await self.scopes():
+    async def locals(
+        self,
+        count: int = 50,
+        frame_id: int | None = None,
+    ) -> list[JsonObject]:
+        """Return a bounded page of locals from a frame."""
+        for scope in await self.scopes(frame_id):
             if (
                 isinstance(scope, dict)
                 and scope.get("name") == "Locals"
@@ -152,13 +163,21 @@ class DebugSession:
                 return await self.variables(reference, count)
         raise RuntimeError("adapter did not return a Locals scope")
 
-    async def evaluate(self, expression: str) -> JsonObject:
-        """Evaluate an expression in the top frame."""
+    async def evaluate(
+        self,
+        expression: str,
+        frame_id: int | None = None,
+    ) -> JsonObject:
+        """Evaluate an expression in a frame, defaulting to the top frame."""
         response = await self._client.request(
             "evaluate",
             {
                 "expression": expression,
-                "frameId": await self._top_frame_id(),
+                "frameId": (
+                    frame_id
+                    if frame_id is not None
+                    else await self._top_frame_id()
+                ),
                 "context": "watch",
             },
         )
@@ -170,6 +189,7 @@ class DebugSession:
         return {
             "state": self._state,
             "threadId": self._thread_id,
+            "exitCode": self._exit_code,
             "breakpoints": [
                 f"{item.file}:{item.line}" for item in self._breakpoints
             ],
@@ -197,6 +217,11 @@ class DebugSession:
             except Exception:
                 pass
         await asyncio.to_thread(self._client.close)
+
+    @property
+    def adapter_reaped(self) -> bool:
+        """Whether the owned adapter process has exited."""
+        return self._client.reaped
 
     async def _sync_breakpoints(self, file: Path) -> None:
         breakpoints: list[JsonObject] = []
@@ -240,10 +265,13 @@ class DebugSession:
             }
         self._state = "terminated"
         self._thread_id = None
+        exit_code = event_body.get("exitCode")
+        if isinstance(exit_code, int):
+            self._exit_code = exit_code
         return {
             "state": self._state,
             "reason": event,
-            "exitCode": event_body.get("exitCode"),
+            "exitCode": self._exit_code,
         }
 
     async def _top_frame_id(self) -> int:

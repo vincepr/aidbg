@@ -25,12 +25,13 @@ class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 stopped = await session.launch(Path("fixture.dll"), Path.cwd(), [])
                 locals_ = await session.locals(20)
-                evaluation = await session.evaluate("task.Name")
+                evaluation = await session.evaluate("task.Name", frame_id=321)
                 terminated = await session.continue_execution()
 
                 self.assertEqual("stopped", stopped["state"])
                 self.assertEqual("docs", locals_[0]["value"])
                 self.assertEqual("docs", evaluation["result"])
+                self.assertEqual(321, evaluation["frameId"])
                 self.assertEqual("terminated", terminated["state"])
                 self.assertTrue(Path(directory, "dap.jsonl").is_file())
             finally:

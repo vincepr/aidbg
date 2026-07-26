@@ -44,6 +44,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertNotIn('"ok":false', result.stdout)
+            self.assertIn('"adapterReaped":true', result.stdout)
 
 
 if __name__ == "__main__":

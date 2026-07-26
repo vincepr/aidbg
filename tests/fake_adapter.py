@@ -96,7 +96,16 @@ while True:
             },
         )
     elif command == "evaluate":
-        respond(request, {"result": "docs", "variablesReference": 0})
+        arguments = request.get("arguments")
+        frame_id = arguments.get("frameId") if isinstance(arguments, dict) else None
+        respond(
+            request,
+            {
+                "result": "docs",
+                "variablesReference": 0,
+                "frameId": frame_id,
+            },
+        )
     elif command == "continue":
         respond(request, {"allThreadsContinued": True})
         send({"type": "event", "event": "terminated", "body": {}})

@@ -22,7 +22,13 @@ class DapRequestError(RuntimeError):
         self.command = command
         self.response = response
         message = response.get("message")
-        super().__init__(f"{command}: {message or 'adapter request failed'}")
+        if not isinstance(message, str) or not message.strip():
+            body = response.get("body")
+            error = body.get("error") if isinstance(body, dict) else None
+            message = error.get("format") if isinstance(error, dict) else None
+        if not isinstance(message, str) or not message.strip():
+            message = "adapter rejected the request; see DAP trace"
+        super().__init__(f"{command}: {message}")
 
 
 class DapClient:
@@ -149,6 +155,11 @@ class DapClient:
                 raise value
             if value.get("event") in names:
                 return value
+
+    @property
+    def reaped(self) -> bool:
+        """Whether the adapter process has exited."""
+        return self._process.poll() is not None
 
     def close(self) -> None:
         """Terminate the adapter and close the trace."""

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import re
 import traceback
 
 from aidbg.commands import Breakpoint, parse_breakpoint, tokenize
@@ -14,8 +15,9 @@ from aidbg.session import DebugSession
 
 HELP = (
     "break FILE:LINE [if EXPR] | launch PROGRAM [--cwd DIR] [--args ...] | "
-    "continue | next | stack [N] | scopes | locals [N] | "
-    "variables REF [N] | eval EXPR | status | stop | quit"
+    "continue | next | stack [N] | scopes [--frame ID] | "
+    "locals [N] [--frame ID] | variables REF [N] | "
+    "eval [--frame ID] EXPR | status | stop | quit"
 )
 
 
@@ -41,6 +43,14 @@ async def run(profile_path: Path, trace_directory: Path) -> int:
                 continue
             try:
                 if await execute(session, line):
+                    await session.close()
+                    emit(
+                        {
+                            "ok": True,
+                            **session.status(),
+                            "adapterReaped": session.adapter_reaped,
+                        }
+                    )
                     return 0
             except Exception as error:
                 record_error(trace_directory, error)
@@ -97,10 +107,16 @@ async def execute(session: DebugSession, line: str) -> bool:
         count = parse_count(arguments, 10)
         emit({"ok": True, "frames": await session.stack(count)})
     elif command == "scopes":
-        emit({"ok": True, "scopes": await session.scopes()})
+        frame_id = parse_frame_option(arguments)
+        emit({"ok": True, "scopes": await session.scopes(frame_id)})
     elif command == "locals":
-        count = parse_count(arguments, 50)
-        emit({"ok": True, "variables": await session.locals(count)})
+        count, frame_id = parse_bounded_frame_options(arguments, 50)
+        emit(
+            {
+                "ok": True,
+                "variables": await session.locals(count, frame_id),
+            }
+        )
     elif command == "variables":
         if not arguments:
             raise ValueError("usage: variables REFERENCE [COUNT]")
@@ -116,7 +132,20 @@ async def execute(session: DebugSession, line: str) -> bool:
         expression = line.partition(" ")[2].strip()
         if not expression:
             raise ValueError("usage: eval EXPRESSION")
-        emit({"ok": True, "evaluation": await session.evaluate(expression)})
+        evaluation_frame_id: int | None = None
+        frame_match = re.fullmatch(r"--frame\s+(\d+)\s+(.+)", expression)
+        if frame_match:
+            evaluation_frame_id = int(frame_match.group(1))
+            expression = frame_match.group(2)
+        emit(
+            {
+                "ok": True,
+                "evaluation": await session.evaluate(
+                    expression,
+                    evaluation_frame_id,
+                ),
+            }
+        )
     elif command == "status":
         emit({"ok": True, **session.status()})
     elif command == "stop":
@@ -156,6 +185,33 @@ def parse_count(arguments: list[str], default: int) -> int:
     if count < 1:
         raise ValueError("count must be positive")
     return count
+
+
+def parse_frame_option(arguments: list[str]) -> int | None:
+    """Parse an optional ``--frame ID``."""
+    if not arguments:
+        return None
+    if len(arguments) != 2 or arguments[0] != "--frame":
+        raise ValueError("usage: scopes [--frame ID]")
+    return int(arguments[1])
+
+
+def parse_bounded_frame_options(
+    arguments: list[str],
+    default_count: int,
+) -> tuple[int, int | None]:
+    """Parse optional count and frame arguments."""
+    count = default_count
+    frame_id: int | None = None
+    index = 0
+    if arguments and arguments[0] != "--frame":
+        count = parse_count(arguments[:1], default_count)
+        index = 1
+    if index < len(arguments):
+        if len(arguments) != index + 2 or arguments[index] != "--frame":
+            raise ValueError("usage: locals [COUNT] [--frame ID]")
+        frame_id = int(arguments[index + 1])
+    return count, frame_id
 
 
 def emit(value: JsonValue) -> None:
