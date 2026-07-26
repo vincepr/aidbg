@@ -14,14 +14,16 @@ import traceback
 from aidbg.commands import Breakpoint, parse_breakpoint, tokenize
 from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
-from aidbg.protocol import JsonValue
-from aidbg.session import DebugSession
+from aidbg.protocol import JsonObject, JsonValue
+from aidbg.session import DebugSession, InvalidVariableReferenceError
 
 
 HELP = (
     "break FILE:LINE [if EXPR] | launch PROGRAM [--cwd DIR] [--args ...] | "
-    "continue | next | stack [N] | scopes [--frame ID] | "
-    "locals [N] [--frame ID] | variables REF [N] | "
+    "continue [--wait S] | wait [--timeout S] | next [--wait S] | "
+    "stack [N] | scopes [--frame ID] | "
+    "locals [N] [--frame ID] [--output FILE] | "
+    "variables REF [N] [--output FILE] | "
     "eval [--frame ID] EXPR | status | stop | quit"
 )
 
@@ -31,10 +33,16 @@ async def run(
     trace_directory: Path,
     limits: SessionLimits,
     session_timeout: float,
+    verbose: bool,
 ) -> int:
     """Run one persistent interactive debugger session."""
     profile = AdapterProfile.load(profile_path)
-    session = await DebugSession.create(profile, trace_directory, limits)
+    session = await DebugSession.create(
+        profile,
+        trace_directory,
+        limits,
+        verbose=verbose,
+    )
     lease = HardSessionLease(session, session_timeout)
     lease.start()
     emit(
@@ -59,21 +67,25 @@ async def run(
                     emit(
                         {
                             "ok": True,
-                            **session.status(),
-                            "adapterReaped": session.adapter_reaped,
+                            **session.cleanup_receipt(),
                         }
                     )
                     return 0
             except Exception as error:
                 record_error(trace_directory, error)
-                emit(
-                    {
-                        "ok": False,
-                        "error": type(error).__name__,
-                        "message": str(error),
-                        "traceDirectory": str(trace_directory.resolve()),
-                    }
-                )
+                payload: JsonObject = {
+                    "ok": False,
+                    "error": (
+                        error.code
+                        if isinstance(error, InvalidVariableReferenceError)
+                        else type(error).__name__
+                    ),
+                    "message": str(error),
+                    "traceDirectory": str(trace_directory.resolve()),
+                }
+                if isinstance(error, InvalidVariableReferenceError):
+                    payload["stopId"] = session.status()["stopId"]
+                emit(payload)
     finally:
         lease.cancel()
         await session.close()
@@ -113,33 +125,81 @@ async def execute(session: DebugSession, line: str) -> bool:
         program, cwd, target_arguments = parse_launch(arguments)
         emit({"ok": True, **await session.launch(program, cwd, target_arguments)})
     elif command == "continue":
-        emit({"ok": True, **await session.continue_execution()})
-    elif command == "next":
-        emit({"ok": True, **await session.next()})
-    elif command == "stack":
-        count = parse_count(arguments, 10)
-        emit({"ok": True, "frames": await session.stack(count)})
-    elif command == "scopes":
-        frame_id = parse_frame_option(arguments)
-        emit({"ok": True, "scopes": await session.scopes(frame_id)})
-    elif command == "locals":
-        count, frame_id = parse_bounded_frame_options(arguments, 50)
+        wait_seconds = parse_timeout_option(
+            arguments,
+            "--wait",
+            "continue [--wait SECONDS]",
+        )
         emit(
             {
                 "ok": True,
-                "variables": await session.locals(count, frame_id),
+                **await session.continue_execution(wait_seconds),
             }
         )
-    elif command == "variables":
-        if not arguments:
-            raise ValueError("usage: variables REFERENCE [COUNT]")
-        reference = int(arguments[0])
-        count = int(arguments[1]) if len(arguments) > 1 else 50
+    elif command == "wait":
+        wait_seconds = parse_timeout_option(
+            arguments,
+            "--timeout",
+            "wait [--timeout SECONDS]",
+        )
+        emit({"ok": True, **await session.wait_for_stop(wait_seconds)})
+    elif command == "next":
+        wait_seconds = parse_timeout_option(
+            arguments,
+            "--wait",
+            "next [--wait SECONDS]",
+        )
+        emit({"ok": True, **await session.next(wait_seconds)})
+    elif command == "stack":
+        count = parse_count(arguments, 10)
         emit(
             {
                 "ok": True,
-                "variables": await session.variables(reference, count),
+                "stopId": session.stop_id,
+                "frames": await session.stack(count),
             }
+        )
+    elif command == "scopes":
+        frame_id = parse_frame_option(arguments)
+        emit(
+            {
+                "ok": True,
+                "stopId": session.stop_id,
+                "scopes": await session.scopes(frame_id),
+            }
+        )
+    elif command == "locals":
+        local_arguments, output_path = parse_output_option(arguments)
+        count, frame_id = parse_bounded_frame_options(local_arguments, 50)
+        variables = await session.locals(count, frame_id)
+        emit_or_export(
+            {
+                "ok": True,
+                "stopId": session.stop_id,
+                "variables": variables,
+            },
+            output_path,
+            len(variables),
+        )
+    elif command == "variables":
+        variable_arguments, output_path = parse_output_option(arguments)
+        if not variable_arguments or len(variable_arguments) > 2:
+            raise ValueError("usage: variables REFERENCE [COUNT]")
+        reference = int(variable_arguments[0])
+        count = (
+            int(variable_arguments[1])
+            if len(variable_arguments) > 1
+            else 50
+        )
+        variables = await session.variables(reference, count)
+        emit_or_export(
+            {
+                "ok": True,
+                "stopId": session.stop_id,
+                "variables": variables,
+            },
+            output_path,
+            len(variables),
         )
     elif command == "eval":
         expression = line.partition(" ")[2].strip()
@@ -153,6 +213,7 @@ async def execute(session: DebugSession, line: str) -> bool:
         emit(
             {
                 "ok": True,
+                "stopId": session.stop_id,
                 "evaluation": await session.evaluate(
                     expression,
                     evaluation_frame_id,
@@ -200,6 +261,42 @@ def parse_count(arguments: list[str], default: int) -> int:
     return count
 
 
+def parse_timeout_option(
+    arguments: list[str],
+    option: str,
+    usage: str,
+) -> float | None:
+    """Parse one optional positive timeout."""
+    if not arguments:
+        return None
+    if len(arguments) != 2 or arguments[0] != option:
+        raise ValueError(f"usage: {usage}")
+    timeout = float(arguments[1])
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    return timeout
+
+
+def parse_output_option(
+    arguments: list[str],
+) -> tuple[list[str], Path | None]:
+    """Remove one optional ``--output FILE`` argument."""
+    positions = [
+        index for index, argument in enumerate(arguments) if argument == "--output"
+    ]
+    if not positions:
+        return arguments, None
+    if len(positions) != 1:
+        raise ValueError("--output may be specified once")
+    index = positions[0]
+    if index + 1 >= len(arguments):
+        raise ValueError("--output requires a file")
+    return (
+        arguments[:index] + arguments[index + 2 :],
+        Path(arguments[index + 1]),
+    )
+
+
 def parse_frame_option(arguments: list[str]) -> int | None:
     """Parse an optional ``--frame ID``."""
     if not arguments:
@@ -230,6 +327,33 @@ def parse_bounded_frame_options(
 def emit(value: JsonValue) -> None:
     """Write one compact model-visible result."""
     print(json.dumps(value, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def emit_or_export(
+    payload: JsonObject,
+    output_path: Path | None,
+    count: int,
+) -> None:
+    """Emit a result or write it to a file and emit only a compact receipt."""
+    if output_path is None:
+        emit(payload)
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    output_path.write_text(f"{serialized}\n", encoding="utf-8")
+    emit(
+        {
+            "ok": True,
+            "stopId": payload.get("stopId"),
+            "outputFile": str(output_path.resolve()),
+            "bytes": len(serialized.encode("utf-8")) + 1,
+            "count": count,
+        }
+    )
 
 
 def record_error(trace_directory: Path, error: BaseException) -> None:
@@ -276,13 +400,13 @@ class HardSessionLease:
         if self._cancelled.wait(self._timeout):
             return
         self._session.force_close()
+        receipt = self._session.cleanup_receipt()
         payload = json.dumps(
             {
                 "ok": False,
                 "error": "SessionTimeout",
                 "message": f"hard session timeout after {self._timeout:g}s",
-                "traceDirectory": str(self._session.trace_directory.resolve()),
-                "adapterReaped": self._session.adapter_reaped,
+                **receipt,
             },
             separators=(",", ":"),
         )
@@ -301,6 +425,7 @@ def main() -> None:
     parser.add_argument("--execution-timeout", type=float, default=120)
     parser.add_argument("--shutdown-timeout", type=float, default=3)
     parser.add_argument("--session-timeout", type=float, default=24 * 60 * 60)
+    parser.add_argument("-v", "--verbose", action="store_true")
     arguments = parser.parse_args()
     trace_directory = arguments.trace_dir or default_trace_directory()
     limits = SessionLimits(
@@ -315,6 +440,7 @@ def main() -> None:
                 trace_directory,
                 limits,
                 arguments.session_timeout,
+                arguments.verbose,
             )
         )
     except Exception as error:

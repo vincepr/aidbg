@@ -61,6 +61,12 @@ class ProcessTree:
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError("adapter process could not be reaped") from error
 
+    @property
+    def closed(self) -> bool:
+        """Whether ownership was closed and cleanup was attempted."""
+        with self._lock:
+            return self._closed
+
 
 def start_owned_process(command: list[str]) -> tuple[subprocess.Popen[bytes], ProcessTree]:
     """Start an isolated adapter process and bind its process-tree owner."""

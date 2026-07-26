@@ -5,29 +5,33 @@ description: Debug runtime failures through the compact, debugger-independent ai
 
 # aidbg Debug
 
-Start one isolated session per agent:
+Run one isolated session per agent:
 
 ```powershell
 python -m aidbg.cli --profile adapters/netcoredbg.json
 ```
 
-1. Build the target with matching symbols.
-2. Add the earliest useful breakpoint before `launch`.
-3. Use `stack`, then focused `locals`, `variables`, or `eval` commands.
-4. Continue or step until evidence explains the root cause.
-5. Run `stop`, then `quit`. Confirm no target or adapter remains.
+Commands:
 
-Keep output bounded. Prefer focused expressions over broad traversal. Full DAP
-traffic and exceptions stay in the reported trace directory; inspect those
-files only when the compact error is insufficient.
+```text
+break FILE:LINE [if EXPR]
+launch PROGRAM [--cwd DIR] [--args ...]
+continue [--wait SECONDS] | wait [--timeout SECONDS] | next [--wait SECONDS]
+stack [COUNT] | scopes [--frame ID] | locals [COUNT] [--frame ID] [--output FILE]
+variables REF [COUNT] [--output FILE] | eval [--frame ID] EXPR
+status | stop | quit
+```
 
-Use `--frame ID` with `scopes`, `locals`, or `eval` when the value belongs to a
-caller. If an adapter rejects lambdas or method-heavy expressions, use direct
-property/index evaluation and follow `variablesReference` values. Stop once
-runtime evidence decisively distinguishes the root cause from competing causes.
+Build with matching symbols and set the earliest useful breakpoint before
+`launch`. Keep inspection focused. Use `--verbose` only for bounded extra stop
+context and `--output` for data that should not enter model context.
 
-Each CLI owns one adapter tree and a unique trace directory. The default hard
-session lease is 24 hours; choose a shorter `--session-timeout` when practical.
+DAP frame and variable references expire on `continue` or `next`; reacquire
+them from the new stop. A wait timeout leaves the target running; call `wait`
+again or `stop`. Prefer direct property/index evaluation when an adapter rejects
+lambdas or method-heavy expressions.
 
-Run `help` for the command list. Read [setup.md](references/setup.md) only when
-the adapter or prerequisites are unavailable.
+Stop once runtime evidence distinguishes the root cause. Run `stop`, then
+`quit`; verify the cleanup receipt. Full DAP traffic and errors remain in the
+reported trace directory. Read [setup.md](references/setup.md) only when the
+adapter or prerequisites are unavailable.

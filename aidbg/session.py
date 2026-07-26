@@ -10,6 +10,12 @@ from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject
 
 
+class InvalidVariableReferenceError(RuntimeError):
+    """A variable reference rejected by the adapter at the current stop."""
+
+    code = "invalid_variable_reference"
+
+
 class DebugSession:
     """Manage one target through one DAP adapter process."""
 
@@ -19,6 +25,7 @@ class DebugSession:
         client: DapClient,
         trace_directory: Path,
         limits: SessionLimits,
+        verbose: bool,
     ) -> None:
         self._profile = profile
         self._client = client
@@ -26,8 +33,11 @@ class DebugSession:
         self._state = "idle"
         self._thread_id: int | None = None
         self._exit_code: int | None = None
+        self._target_exited = False
+        self._stop_id = 0
         self.trace_directory = trace_directory
         self._limits = limits
+        self._verbose = verbose
 
     @classmethod
     async def create(
@@ -35,6 +45,8 @@ class DebugSession:
         profile: AdapterProfile,
         trace_directory: Path,
         limits: SessionLimits | None = None,
+        *,
+        verbose: bool = False,
     ) -> "DebugSession":
         """Start and initialize an adapter."""
         effective_limits = limits or SessionLimits()
@@ -46,7 +58,13 @@ class DebugSession:
         )
         try:
             await client.request("initialize", profile.initialize)
-            return cls(profile, client, trace_directory, effective_limits)
+            return cls(
+                profile,
+                client,
+                trace_directory,
+                effective_limits,
+                verbose,
+            )
         except Exception:
             client.close()
             raise
@@ -94,7 +112,10 @@ class DebugSession:
         self._state = "running"
         return await self._wait_execution()
 
-    async def continue_execution(self) -> JsonObject:
+    async def continue_execution(
+        self,
+        wait_seconds: float | None = None,
+    ) -> JsonObject:
         """Continue and wait for the next stop or termination."""
         self._require_stopped()
         self._state = "running"
@@ -102,14 +123,20 @@ class DebugSession:
             "continue",
             {"threadId": self._thread_id},
         )
-        return await self._wait_execution()
+        return await self._wait_execution(wait_seconds)
 
-    async def next(self) -> JsonObject:
+    async def next(self, wait_seconds: float | None = None) -> JsonObject:
         """Step over and wait for the next stop."""
         self._require_stopped()
         self._state = "running"
         await self._client.request("next", {"threadId": self._thread_id})
-        return await self._wait_execution()
+        return await self._wait_execution(wait_seconds)
+
+    async def wait_for_stop(self, wait_seconds: float | None = None) -> JsonObject:
+        """Wait for a running target to stop or terminate."""
+        if self._state != "running":
+            raise RuntimeError("target is not running")
+        return await self._wait_execution(wait_seconds)
 
     async def stack(self, levels: int = 10) -> list[JsonObject]:
         """Return a bounded call stack."""
@@ -146,14 +173,21 @@ class DebugSession:
     ) -> list[JsonObject]:
         """Return a bounded page of variables."""
         self._require_stopped()
-        response = await self._client.request(
-            "variables",
-            {
-                "variablesReference": reference,
-                "start": 0,
-                "count": count,
-            },
-        )
+        try:
+            response = await self._client.request(
+                "variables",
+                {
+                    "variablesReference": reference,
+                    "start": 0,
+                    "count": count,
+                },
+            )
+        except DapRequestError as error:
+            raise InvalidVariableReferenceError(
+                f"variable reference {reference} was rejected at stop "
+                f"{self._stop_id}; it may belong to an earlier stop. "
+                "Run locals or scopes again after every continue or step."
+            ) from error
         return _body_objects(response, "variables")[:count]
 
     async def locals(
@@ -199,6 +233,7 @@ class DebugSession:
         return {
             "state": self._state,
             "threadId": self._thread_id,
+            "stopId": self._stop_id,
             "exitCode": self._exit_code,
             "breakpoints": [
                 f"{item.file}:{item.line}" for item in self._breakpoints
@@ -234,10 +269,26 @@ class DebugSession:
         self._thread_id = None
         self._client.close()
 
+    def cleanup_receipt(self) -> JsonObject:
+        """Return authoritative process cleanup state."""
+        return {
+            **self.status(),
+            "targetExited": (
+                self._target_exited or self._client.process_tree_closed
+            ),
+            "adapterReaped": self._client.reaped,
+            "processTreeClosed": self._client.process_tree_closed,
+        }
+
     @property
     def adapter_reaped(self) -> bool:
         """Whether the owned adapter process has exited."""
         return self._client.reaped
+
+    @property
+    def stop_id(self) -> int:
+        """Return the current stop generation."""
+        return self._stop_id
 
     async def _sync_breakpoints(self, file: Path) -> None:
         breakpoints: list[JsonObject] = []
@@ -260,27 +311,50 @@ class DebugSession:
             },
         )
 
-    async def _wait_execution(self) -> JsonObject:
-        message = await self._client.wait_event(
-            {"stopped", "terminated", "exited"},
-            timeout=self._limits.execution_seconds,
-        )
+    async def _wait_execution(
+        self,
+        wait_seconds: float | None = None,
+    ) -> JsonObject:
+        try:
+            message = await self._client.wait_event(
+                {"stopped", "terminated", "exited"},
+                timeout=wait_seconds or self._limits.execution_seconds,
+            )
+        except TimeoutError:
+            return {
+                "state": "running",
+                "waitTimedOut": True,
+                "hint": "Use wait --timeout SECONDS or stop.",
+            }
         event = message.get("event")
         body = message.get("body")
         event_body = body if isinstance(body, dict) else {}
         if event == "stopped":
             self._state = "stopped"
+            self._stop_id += 1
             thread_id = event_body.get("threadId")
             self._thread_id = thread_id if isinstance(thread_id, int) else None
-            frames = await self.stack(1)
-            return {
+            frames = await self.stack(10 if self._verbose else 1)
+            frame = frames[0] if frames else None
+            source_context = _source_context(
+                frame,
+                radius=5 if self._verbose else 1,
+            )
+            snapshot: JsonObject = {
                 "state": self._state,
                 "reason": event_body.get("reason"),
                 "threadId": self._thread_id,
-                "frame": frames[0] if frames else None,
+                "stopId": self._stop_id,
+                "frame": frame,
             }
+            if source_context is not None:
+                snapshot["sourceContext"] = source_context
+            if self._verbose:
+                snapshot["frames"] = frames
+            return snapshot
         self._state = "terminated"
         self._thread_id = None
+        self._target_exited = True
         exit_code = event_body.get("exitCode")
         if isinstance(exit_code, int):
             self._exit_code = exit_code
@@ -312,3 +386,26 @@ def _body_objects(response: JsonObject, name: str) -> list[JsonObject]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _source_context(
+    frame: JsonObject | None,
+    radius: int,
+) -> JsonObject | None:
+    if frame is None:
+        return None
+    source = frame.get("source")
+    line = frame.get("line")
+    path = source.get("path") if isinstance(source, dict) else None
+    if not isinstance(path, str) or not isinstance(line, int) or line < 1:
+        return None
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    start = max(1, line - radius)
+    end = min(len(lines), line + radius)
+    return {
+        "startLine": start,
+        "lines": lines[start - 1 : end],
+    }

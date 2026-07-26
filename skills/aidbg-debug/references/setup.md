@@ -15,7 +15,8 @@ Each invocation creates a unique `.aidbg/sessions/` directory unless
 agents. Defaults are 30 seconds per DAP request, 120 seconds waiting for target
 execution, 3 seconds for cleanup, and a 24-hour hard session lease. Override
 them with `--request-timeout`, `--execution-timeout`, `--shutdown-timeout`, and
-`--session-timeout`.
+`--session-timeout`. An execution wait timeout is nonfatal: the target remains
+running and can be observed with `wait --timeout SECONDS`.
 
 Adapter profiles contain executable candidates, adapter arguments, initialize
 arguments, and launch defaults. Add another debugger by creating a JSON profile

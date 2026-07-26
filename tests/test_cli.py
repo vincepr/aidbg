@@ -57,6 +57,198 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(first.parent, second.parent)
 
+    def test_wait_command_resumes_observing_a_running_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory, "fake.json")
+            profile.write_text(
+                json.dumps(
+                    {
+                        "id": "fake",
+                        "commandCandidates": [sys.executable],
+                        "arguments": [
+                            str(Path(__file__).with_name("fake_adapter.py")),
+                            "0.2",
+                        ],
+                        "initialize": {"adapterID": "fake"},
+                        "launchDefaults": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "aidbg.cli",
+                    "--profile",
+                    str(profile),
+                    "--trace-dir",
+                    str(Path(directory, "trace")),
+                    "--execution-timeout",
+                    "0.05",
+                ],
+                input=(
+                    "break Fixture.cs:27\n"
+                    "launch fixture.dll\n"
+                    "continue\n"
+                    "wait --timeout 0.5\n"
+                    "quit\n"
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('"waitTimedOut":true', result.stdout)
+            self.assertNotIn('"ok":false', result.stdout)
+            self.assertIn('"reason":"terminated"', result.stdout)
+            self.assertIn('"targetExited":true', result.stdout)
+            self.assertIn('"processTreeClosed":true', result.stdout)
+
+    def test_verbose_flag_adds_stop_stack_details(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "Fixture.cs")
+            source.write_text(
+                "".join(f"line {line}\n" for line in range(1, 31)),
+                encoding="utf-8",
+            )
+            profile = Path(directory, "fake.json")
+            profile.write_text(
+                json.dumps(
+                    {
+                        "id": "fake",
+                        "commandCandidates": [sys.executable],
+                        "arguments": [
+                            str(Path(__file__).with_name("fake_adapter.py")),
+                            "0",
+                            str(source),
+                        ],
+                        "initialize": {"adapterID": "fake"},
+                        "launchDefaults": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "aidbg.cli",
+                    "--profile",
+                    str(profile),
+                    "--trace-dir",
+                    str(Path(directory, "trace")),
+                    "--verbose",
+                ],
+                input="launch fixture.dll\nstop\nquit\n",
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('"frames":[', result.stdout)
+            self.assertIn('"startLine":22', result.stdout)
+
+    def test_variable_reference_error_includes_stop_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory, "fake.json")
+            profile.write_text(
+                json.dumps(
+                    {
+                        "id": "fake",
+                        "commandCandidates": [sys.executable],
+                        "arguments": [
+                            str(Path(__file__).with_name("fake_adapter.py"))
+                        ],
+                        "initialize": {"adapterID": "fake"},
+                        "launchDefaults": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "aidbg.cli",
+                    "--profile",
+                    str(profile),
+                    "--trace-dir",
+                    str(Path(directory, "trace")),
+                ],
+                input="launch fixture.dll\nlocals 10\nvariables 999\nquit\n",
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('"error":"invalid_variable_reference"', result.stdout)
+            self.assertIn('"stopId":1', result.stdout)
+            self.assertIn('"stopId":1,"variables":[', result.stdout)
+            self.assertIn("Run locals or scopes again", result.stdout)
+
+    def test_variables_can_be_written_without_returning_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory, "fake.json")
+            output_path = Path(directory, "exports", "variables.json")
+            profile.write_text(
+                json.dumps(
+                    {
+                        "id": "fake",
+                        "commandCandidates": [sys.executable],
+                        "arguments": [
+                            str(Path(__file__).with_name("fake_adapter.py"))
+                        ],
+                        "initialize": {"adapterID": "fake"},
+                        "launchDefaults": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "aidbg.cli",
+                    "--profile",
+                    str(profile),
+                    "--trace-dir",
+                    str(Path(directory, "trace")),
+                ],
+                input=(
+                    "launch fixture.dll\n"
+                    f'variables 10 10 --output "{output_path}"\n'
+                    "quit\n"
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(output_path.is_file())
+            exported = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual("task", exported["variables"][0]["name"])
+            self.assertIn('"outputFile":', result.stdout)
+            self.assertIn('"count":1', result.stdout)
+            receipt = next(
+                line
+                for line in result.stdout.splitlines()
+                if '"outputFile":' in line
+            )
+            self.assertNotIn('"variables":', receipt)
+
     def test_hard_session_timeout_exits_blocked_repl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory, "fake.json")
@@ -105,6 +297,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(124, return_code, output)
             self.assertLess(time.monotonic() - started, 4)
             self.assertIn('"error":"SessionTimeout"', output)
+            self.assertIn('"adapterReaped":true', output)
+            self.assertIn('"processTreeClosed":true', output)
 
     def test_hard_timeout_reaps_adapter_descendant(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

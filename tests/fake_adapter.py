@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
@@ -9,6 +10,8 @@ from aidbg.protocol import JsonObject, read_message, write_message
 
 sequence = 0
 pending_launch: JsonObject | None = None
+continue_delay = float(sys.argv[1]) if len(sys.argv) > 1 else 0
+source_path = sys.argv[2] if len(sys.argv) > 2 else "Fixture.cs"
 
 
 def send(message: JsonObject) -> None:
@@ -63,7 +66,7 @@ while True:
                         "name": "Fixture.Run",
                         "line": 27,
                         "column": 1,
-                        "source": {"name": "Fixture.cs", "path": "Fixture.cs"},
+                        "source": {"name": "Fixture.cs", "path": source_path},
                     }
                 ]
             },
@@ -82,6 +85,23 @@ while True:
             },
         )
     elif command == "variables":
+        arguments = request.get("arguments")
+        reference = (
+            arguments.get("variablesReference")
+            if isinstance(arguments, dict)
+            else None
+        )
+        if reference != 10:
+            send(
+                {
+                    "type": "response",
+                    "request_seq": request["seq"],
+                    "command": command,
+                    "success": False,
+                    "message": "0x80004005",
+                }
+            )
+            continue
         respond(
             request,
             {
@@ -108,6 +128,7 @@ while True:
         )
     elif command == "continue":
         respond(request, {"allThreadsContinued": True})
+        time.sleep(continue_delay)
         send({"type": "event", "event": "terminated", "body": {}})
     elif command == "disconnect":
         respond(request)

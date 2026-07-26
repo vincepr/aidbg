@@ -126,7 +126,7 @@ class DapClient:
         """Await a response future without blocking the event loop."""
         try:
             return await asyncio.wait_for(
-                asyncio.wrap_future(completion),
+                asyncio.shield(asyncio.wrap_future(completion)),
                 timeout or self._limits.request_seconds,
             )
         except TimeoutError as error:
@@ -161,6 +161,11 @@ class DapClient:
     def reaped(self) -> bool:
         """Whether the adapter process has exited."""
         return self._process.poll() is not None
+
+    @property
+    def process_tree_closed(self) -> bool:
+        """Whether the owned adapter process tree has been closed."""
+        return self._process_tree.closed
 
     def close(self) -> None:
         """Terminate the adapter and close the trace."""
