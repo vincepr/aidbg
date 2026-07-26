@@ -11,6 +11,79 @@ from aidbg.cli import default_trace_directory
 
 
 class CliTests(unittest.TestCase):
+    def test_adapter_exit_uses_stable_error_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            profile = write_profile(
+                Path(directory),
+                "exiting",
+                "exiting_adapter.py",
+            )
+            result = run_cli(
+                Path(directory),
+                profile,
+                "launch fixture.dll\nquit\n",
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('"error":"adapter_exited"', result.stdout)
+            self.assertIn("exit code 23", result.stdout)
+            self.assertNotIn('"error":"OSError"', result.stdout)
+
+    def test_relaunch_after_termination_has_stable_recovery_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = run_cli(
+                root,
+                write_profile(root),
+                (
+                    "launch fixture.dll\n"
+                    "continue\n"
+                    "launch fixture.dll\n"
+                    "quit\n"
+                ),
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn('"error":"session_terminated"', result.stdout)
+            self.assertIn("start a new aidbg session", result.stdout)
+            self.assertNotIn("already active", result.stdout)
+
+    def test_break_condition_keeps_expression_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = run_cli(
+                root,
+                write_profile(root),
+                (
+                    'break Fixture.cs:27 if task.Name == "deploy"\n'
+                    "launch fixture.dll\n"
+                    "quit\n"
+                ),
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn(
+                '"condition":"task.Name == \\"deploy\\""',
+                result.stdout,
+            )
+            records = [
+                json.loads(line)
+                for line in Path(root, "trace", "dap.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            request = next(
+                record["value"]
+                for record in records
+                if record["direction"] == "send"
+                and isinstance(record["value"], dict)
+                and record["value"].get("command") == "setBreakpoints"
+            )
+            self.assertEqual(
+                'task.Name == "deploy"',
+                request["arguments"]["breakpoints"][0]["condition"],
+            )
+
     def test_quit_exits_successfully_without_false_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory, "fake.json")
@@ -249,6 +322,31 @@ class CliTests(unittest.TestCase):
             )
             self.assertNotIn('"variables":', receipt)
 
+    def test_locals_can_be_written_without_returning_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_path = root / "exports" / "locals.json"
+            result = run_cli(
+                root,
+                write_profile(root),
+                (
+                    "launch fixture.dll\n"
+                    f'locals 10 --output "{output_path}"\n'
+                    "quit\n"
+                ),
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            exported = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual("task", exported["variables"][0]["name"])
+            receipt = next(
+                line
+                for line in result.stdout.splitlines()
+                if '"outputFile":' in line
+            )
+            self.assertIn('"count":1', receipt)
+            self.assertNotIn('"variables":', receipt)
+
     def test_hard_session_timeout_exits_blocked_repl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory, "fake.json")
@@ -350,6 +448,52 @@ class CliTests(unittest.TestCase):
             while process_exists(child_pid) and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertFalse(process_exists(child_pid))
+
+
+def write_profile(
+    root: Path,
+    adapter_id: str = "fake",
+    script: str = "fake_adapter.py",
+) -> Path:
+    """Write a minimal test adapter profile."""
+    profile = root / f"{adapter_id}.json"
+    profile.write_text(
+        json.dumps(
+            {
+                "id": adapter_id,
+                "commandCandidates": [sys.executable],
+                "arguments": [str(Path(__file__).with_name(script))],
+                "initialize": {"adapterID": adapter_id},
+                "launchDefaults": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return profile
+
+
+def run_cli(
+    root: Path,
+    profile: Path,
+    commands: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run the CLI against a test profile."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "aidbg.cli",
+            "--profile",
+            str(profile),
+            "--trace-dir",
+            str(root / "trace"),
+        ],
+        input=commands,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
 
 
 def process_exists(process_id: int) -> bool:

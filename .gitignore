@@ -3,8 +3,15 @@ __pycache__/
 .aidbg/
 .venv/
 .mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 build/
 dist/
 *.egg-info/
 bin/
 obj/
+.DS_Store
+Thumbs.db

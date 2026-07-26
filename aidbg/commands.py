@@ -27,6 +27,26 @@ def parse_breakpoint(value: str) -> Breakpoint:
     return Breakpoint(Path(file), line)
 
 
+def parse_break_command(value: str) -> Breakpoint:
+    """Parse a breakpoint location while preserving its condition verbatim."""
+    location, remainder = _split_first_argument(value)
+    breakpoint = parse_breakpoint(location)
+    if not remainder:
+        return breakpoint
+    parts = remainder.split(maxsplit=1)
+    if (
+        len(parts) != 2
+        or parts[0].lower() != "if"
+        or not parts[1].strip()
+    ):
+        raise ValueError("usage: break FILE:LINE [if EXPR]")
+    return Breakpoint(
+        breakpoint.file,
+        breakpoint.line,
+        parts[1].strip(),
+    )
+
+
 def tokenize(value: str) -> list[str]:
     """Split a command while preserving quoted paths and backslashes."""
     result: list[str] = []
@@ -46,3 +66,18 @@ def tokenize(value: str) -> list[str]:
     if current:
         result.append("".join(current))
     return result
+
+
+def _split_first_argument(value: str) -> tuple[str, str]:
+    value = value.lstrip()
+    if not value:
+        raise ValueError("usage: break FILE:LINE [if EXPR]")
+    if value[0] != '"':
+        for index, character in enumerate(value):
+            if character.isspace():
+                return value[:index], value[index:].lstrip()
+        return value, ""
+    closing_quote = value.find('"', 1)
+    if closing_quote < 0:
+        raise ValueError("unterminated quoted argument")
+    return value[1:closing_quote], value[closing_quote + 1 :].lstrip()

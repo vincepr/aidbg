@@ -11,11 +11,14 @@ import secrets
 import threading
 import traceback
 
-from aidbg.commands import Breakpoint, parse_breakpoint, tokenize
+from aidbg.commands import parse_break_command, tokenize
 from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject, JsonValue
 from aidbg.session import DebugSession, InvalidVariableReferenceError
+
+
+DEFAULT_SESSION_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 HELP = (
@@ -75,11 +78,7 @@ async def run(
                 record_error(trace_directory, error)
                 payload: JsonObject = {
                     "ok": False,
-                    "error": (
-                        error.code
-                        if isinstance(error, InvalidVariableReferenceError)
-                        else type(error).__name__
-                    ),
+                    "error": error_code(error),
                     "message": str(error),
                     "traceDirectory": str(trace_directory.resolve()),
                 }
@@ -93,26 +92,21 @@ async def run(
 
 async def execute(session: DebugSession, line: str) -> bool:
     """Execute one REPL command; return true when the session should exit."""
-    tokens = tokenize(line)
-    if not tokens:
+    command_parts = line.split(maxsplit=1)
+    if not command_parts:
         return False
-    command = tokens[0].lower()
-    arguments = tokens[1:]
+    command = command_parts[0].lower()
+    raw_arguments = command_parts[1] if len(command_parts) == 2 else ""
+    arguments = (
+        []
+        if command in {"break", "eval"}
+        else tokenize(raw_arguments)
+    )
 
     if command == "help":
         emit({"ok": True, "commands": HELP})
     elif command == "break":
-        if not arguments:
-            raise ValueError("usage: break FILE:LINE [if EXPR]")
-        breakpoint = parse_breakpoint(arguments[0])
-        if len(arguments) > 1:
-            if arguments[1].lower() != "if" or len(arguments) < 3:
-                raise ValueError("usage: break FILE:LINE [if EXPR]")
-            breakpoint = Breakpoint(
-                breakpoint.file,
-                breakpoint.line,
-                " ".join(arguments[2:]),
-            )
+        breakpoint = parse_break_command(raw_arguments)
         await session.add_breakpoint(breakpoint)
         emit(
             {
@@ -202,7 +196,7 @@ async def execute(session: DebugSession, line: str) -> bool:
             len(variables),
         )
     elif command == "eval":
-        expression = line.partition(" ")[2].strip()
+        expression = raw_arguments
         if not expression:
             raise ValueError("usage: eval EXPRESSION")
         evaluation_frame_id: int | None = None
@@ -363,6 +357,12 @@ def record_error(trace_directory: Path, error: BaseException) -> None:
         traceback.print_exception(error, file=stream)
 
 
+def error_code(error: BaseException) -> str:
+    """Return a stable public code when an error defines one."""
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) else type(error).__name__
+
+
 def default_trace_directory() -> Path:
     """Return a collision-resistant per-process trace directory."""
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -424,7 +424,11 @@ def main() -> None:
     parser.add_argument("--request-timeout", type=float, default=30)
     parser.add_argument("--execution-timeout", type=float, default=120)
     parser.add_argument("--shutdown-timeout", type=float, default=3)
-    parser.add_argument("--session-timeout", type=float, default=24 * 60 * 60)
+    parser.add_argument(
+        "--session-timeout",
+        type=float,
+        default=DEFAULT_SESSION_TIMEOUT_SECONDS,
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     arguments = parser.parse_args()
     trace_directory = arguments.trace_dir or default_trace_directory()
@@ -448,7 +452,7 @@ def main() -> None:
         emit(
             {
                 "ok": False,
-                "error": type(error).__name__,
+                "error": error_code(error),
                 "message": str(error),
                 "traceDirectory": str(trace_directory.resolve()),
             }

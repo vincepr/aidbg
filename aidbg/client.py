@@ -32,6 +32,24 @@ class DapRequestError(RuntimeError):
         super().__init__(f"{command}: {message}")
 
 
+class AdapterExitedError(RuntimeError):
+    """The adapter transport ended before the session was closed."""
+
+    code = "adapter_exited"
+
+    def __init__(self, exit_code: int | None, trace_path: Path) -> None:
+        self.exit_code = exit_code
+        self.trace_path = trace_path
+        detail = (
+            f" with exit code {exit_code}"
+            if exit_code is not None
+            else ""
+        )
+        super().__init__(
+            f"debug adapter exited{detail}; inspect {trace_path}"
+        )
+
+
 class DapClient:
     """Own one adapter process and correlate its asynchronous messages."""
 
@@ -98,6 +116,8 @@ class DapClient:
         """Send a request while allowing later protocol work before its response."""
         if self._closed:
             raise RuntimeError("DAP client is closed")
+        if self.reaped:
+            raise self._adapter_exited_error()
         with self._pending_lock:
             self._sequence += 1
             sequence = self._sequence
@@ -114,7 +134,9 @@ class DapClient:
             self._write("send", message)
         except BaseException:
             with self._pending_lock:
-                self._pending.pop(sequence, None)
+                pending = self._pending.pop(sequence, None)
+                if pending is not None:
+                    pending.cancel()
             raise
         return completion
 
@@ -174,7 +196,10 @@ class DapClient:
                 return
             self._closed = True
             if self._process.stdin is not None:
-                self._process.stdin.close()
+                try:
+                    self._process.stdin.close()
+                except (OSError, ValueError):
+                    pass
             try:
                 self._process.wait(timeout=self._limits.shutdown_seconds)
             except subprocess.TimeoutExpired:
@@ -193,7 +218,10 @@ class DapClient:
             raise RuntimeError("adapter input is unavailable")
         with self._write_lock:
             self._record(direction, message)
-            write_message(cast(BinaryIO, self._process.stdin), message)
+            try:
+                write_message(cast(BinaryIO, self._process.stdin), message)
+            except (OSError, ValueError) as error:
+                raise self._adapter_exited_error() from error
 
     def _read_messages(self) -> None:
         if self._process.stdout is None:
@@ -211,18 +239,23 @@ class DapClient:
                                 request_sequence,
                                 None,
                             )
-                        if completion is not None:
-                            completion.set_result(message)
+                            if completion is not None:
+                                completion.set_result(message)
                 elif message_type == "event":
                     self._events.put(message)
         except BaseException as error:
             if not self._closed:
-                self._events.put(error)
+                transport_error = (
+                    error
+                    if isinstance(error, AdapterExitedError)
+                    else self._adapter_exited_error()
+                )
+                self._events.put(transport_error)
                 with self._pending_lock:
                     pending = tuple(self._pending.values())
                     self._pending.clear()
-                for completion in pending:
-                    completion.set_exception(error)
+                    for completion in pending:
+                        completion.set_exception(transport_error)
 
     def _read_stderr(self) -> None:
         if self._process.stderr is None:
@@ -245,3 +278,12 @@ class DapClient:
             )
             self._trace.write("\n")
             self._trace.flush()
+
+    def _adapter_exited_error(self) -> AdapterExitedError:
+        exit_code = self._process.poll()
+        if exit_code is None:
+            try:
+                exit_code = self._process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+        return AdapterExitedError(exit_code, self.trace_path)

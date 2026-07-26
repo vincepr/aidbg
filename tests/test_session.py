@@ -9,10 +9,55 @@ import unittest
 from aidbg.commands import Breakpoint
 from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
-from aidbg.session import DebugSession, InvalidVariableReferenceError
+from aidbg.session import (
+    DebugSession,
+    InvalidVariableReferenceError,
+    SessionTerminatedError,
+)
 
 
 class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_launch_surfaces_unverified_breakpoint_binding(self) -> None:
+        profile = AdapterProfile(
+            adapter_id="fake",
+            command_candidates=(sys.executable,),
+            arguments=(
+                str(Path(__file__).with_name("fake_adapter.py")),
+                "0",
+                "Fixture.cs",
+                "pending",
+            ),
+            initialize={"adapterID": "fake"},
+            launch_defaults={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = await DebugSession.create(profile, Path(directory))
+            try:
+                await session.add_breakpoint(
+                    Breakpoint(Path("Fixture.cs"), 27, 'task.Name == "deploy"')
+                )
+
+                stopped = await session.launch(
+                    Path("fixture.dll"),
+                    Path.cwd(),
+                    [],
+                )
+
+                self.assertEqual(
+                    [
+                        {
+                            "path": str(Path("Fixture.cs").resolve()),
+                            "line": 27,
+                            "verified": False,
+                            "message": "pending test binding",
+                            "condition": 'task.Name == "deploy"',
+                        }
+                    ],
+                    stopped["breakpointBindings"],
+                )
+            finally:
+                await session.close()
+
     async def test_stop_snapshot_has_generation_and_bounded_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, "Fixture.cs")
@@ -115,6 +160,28 @@ class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(321, evaluation["frameId"])
                 self.assertEqual("terminated", terminated["state"])
                 self.assertTrue(Path(directory, "dap.jsonl").is_file())
+            finally:
+                await session.close()
+
+    async def test_terminated_session_rejects_relaunch_with_recovery(self) -> None:
+        profile = AdapterProfile(
+            adapter_id="fake",
+            command_candidates=(sys.executable,),
+            arguments=(str(Path(__file__).with_name("fake_adapter.py")),),
+            initialize={"adapterID": "fake"},
+            launch_defaults={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = await DebugSession.create(profile, Path(directory))
+            try:
+                await session.launch(Path("fixture.dll"), Path.cwd(), [])
+                await session.continue_execution()
+
+                with self.assertRaises(SessionTerminatedError) as raised:
+                    await session.launch(Path("fixture.dll"), Path.cwd(), [])
+
+                self.assertEqual("session_terminated", raised.exception.code)
+                self.assertIn("start a new aidbg session", str(raised.exception))
             finally:
                 await session.close()
 

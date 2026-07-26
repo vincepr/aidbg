@@ -1,7 +1,12 @@
 from pathlib import Path
 import unittest
 
-from aidbg.commands import Breakpoint, parse_breakpoint, tokenize
+from aidbg.commands import (
+    Breakpoint,
+    parse_break_command,
+    parse_breakpoint,
+    tokenize,
+)
 
 
 class CommandTests(unittest.TestCase):
@@ -26,6 +31,35 @@ class CommandTests(unittest.TestCase):
                 "--cwd",
                 r"D:\coding\fixture with spaces",
             ],
+            actual,
+        )
+
+    def test_break_condition_preserves_expression_string_literals(self) -> None:
+        actual = parse_break_command(
+            '"D:\\coding\\fixture with spaces\\Task.cs:27" '
+            'if task.Name == "deploy"'
+        )
+
+        self.assertEqual(
+            Breakpoint(
+                Path(r"D:\coding\fixture with spaces\Task.cs"),
+                27,
+                'task.Name == "deploy"',
+            ),
+            actual,
+        )
+
+    def test_break_command_accepts_general_whitespace(self) -> None:
+        actual = parse_break_command(
+            "Fixture.cs:27\tif\ttask.Name == \"deploy\""
+        )
+
+        self.assertEqual(
+            Breakpoint(
+                Path("Fixture.cs"),
+                27,
+                'task.Name == "deploy"',
+            ),
             actual,
         )
 

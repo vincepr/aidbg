@@ -12,7 +12,9 @@ dependencies = []
 [project.scripts]
 aidbg = "aidbg.cli:main"
 
+[project.urls]
+Repository = "https://github.com/vincepr/aidbg"
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
-

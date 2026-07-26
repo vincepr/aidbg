@@ -12,6 +12,7 @@ sequence = 0
 pending_launch: JsonObject | None = None
 continue_delay = float(sys.argv[1]) if len(sys.argv) > 1 else 0
 source_path = sys.argv[2] if len(sys.argv) > 2 else "Fixture.cs"
+breakpoint_mode = sys.argv[3] if len(sys.argv) > 3 else "verified"
 
 
 def send(message: JsonObject) -> None:
@@ -41,7 +42,36 @@ while True:
     elif command == "launch":
         pending_launch = request
         send({"type": "event", "event": "initialized", "body": {}})
-    elif command in {"setBreakpoints", "setExceptionBreakpoints"}:
+    elif command == "setBreakpoints":
+        arguments = request.get("arguments")
+        requested = (
+            arguments.get("breakpoints")
+            if isinstance(arguments, dict)
+            else None
+        )
+        lines = [
+            item.get("line")
+            for item in requested
+            if isinstance(item, dict) and isinstance(item.get("line"), int)
+        ] if isinstance(requested, list) else []
+        respond(
+            request,
+            {
+                "breakpoints": [
+                    {
+                        "verified": breakpoint_mode == "verified",
+                        "line": line,
+                        **(
+                            {"message": "pending test binding"}
+                            if breakpoint_mode != "verified"
+                            else {}
+                        ),
+                    }
+                    for line in lines
+                ]
+            },
+        )
+    elif command == "setExceptionBreakpoints":
         respond(request)
     elif command == "configurationDone":
         respond(request)

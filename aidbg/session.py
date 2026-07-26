@@ -16,6 +16,12 @@ class InvalidVariableReferenceError(RuntimeError):
     code = "invalid_variable_reference"
 
 
+class SessionTerminatedError(RuntimeError):
+    """A command tried to reuse a completed adapter session."""
+
+    code = "session_terminated"
+
+
 class DebugSession:
     """Manage one target through one DAP adapter process."""
 
@@ -30,6 +36,7 @@ class DebugSession:
         self._profile = profile
         self._client = client
         self._breakpoints: list[Breakpoint] = []
+        self._breakpoint_bindings: dict[Path, list[JsonObject]] = {}
         self._state = "idle"
         self._thread_id: int | None = None
         self._exit_code: int | None = None
@@ -90,6 +97,11 @@ class DebugSession:
         arguments: list[str],
     ) -> JsonObject:
         """Launch a target and wait for its first stop or termination."""
+        if self._state == "terminated":
+            raise SessionTerminatedError(
+                "this adapter session has terminated; quit and start a new "
+                "aidbg session"
+            )
         if self._state != "idle":
             raise RuntimeError("a target is already active")
         launch_arguments = dict(self._profile.launch_defaults)
@@ -110,7 +122,11 @@ class DebugSession:
         if response.get("success") is not True:
             raise DapRequestError("launch", response)
         self._state = "running"
-        return await self._wait_execution()
+        result = await self._wait_execution()
+        bindings = self._all_breakpoint_bindings()
+        if bindings:
+            result["breakpointBindings"] = bindings
+        return result
 
     async def continue_execution(
         self,
@@ -238,6 +254,7 @@ class DebugSession:
             "breakpoints": [
                 f"{item.file}:{item.line}" for item in self._breakpoints
             ],
+            "breakpointBindings": self._all_breakpoint_bindings(),
             "traceDirectory": str(self.trace_directory),
         }
 
@@ -299,7 +316,7 @@ class DebugSession:
             if item.condition:
                 value["condition"] = item.condition
             breakpoints.append(value)
-        await self._client.request(
+        response = await self._client.request(
             "setBreakpoints",
             {
                 "source": {
@@ -310,6 +327,43 @@ class DebugSession:
                 "sourceModified": False,
             },
         )
+        adapter_breakpoints = _body_objects(response, "breakpoints")
+        bindings: list[JsonObject] = []
+        for index, requested in enumerate(
+            item for item in self._breakpoints if item.file == file
+        ):
+            adapter = (
+                adapter_breakpoints[index]
+                if index < len(adapter_breakpoints)
+                else {}
+            )
+            resolved_line = adapter.get("line")
+            binding: JsonObject = {
+                "path": str(file.resolve()),
+                "line": (
+                    resolved_line
+                    if isinstance(resolved_line, int)
+                    else requested.line
+                ),
+                "verified": adapter.get("verified"),
+            }
+            message = adapter.get("message")
+            if isinstance(message, str):
+                binding["message"] = message
+            if requested.condition:
+                binding["condition"] = requested.condition
+            breakpoint_id = adapter.get("id")
+            if isinstance(breakpoint_id, int):
+                binding["id"] = breakpoint_id
+            bindings.append(binding)
+        self._breakpoint_bindings[file] = bindings
+
+    def _all_breakpoint_bindings(self) -> list[JsonObject]:
+        return [
+            binding
+            for file_bindings in self._breakpoint_bindings.values()
+            for binding in file_bindings
+        ]
 
     async def _wait_execution(
         self,
