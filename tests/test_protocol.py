@@ -25,6 +25,20 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Content-Length"):
             read_message(stream)
 
+    def test_declared_payload_above_limit_is_rejected_before_body_read(self) -> None:
+        stream = io.BytesIO(
+            f"Content-Length: {(16 * 1024 * 1024) + 1}\r\n\r\n".encode()
+        )
+
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            read_message(stream)
+
+    def test_header_line_above_limit_is_rejected(self) -> None:
+        stream = io.BytesIO(b"X" * 8193 + b"\r\n\r\n")
+
+        with self.assertRaisesRegex(ValueError, "header line exceeds"):
+            read_message(stream)
+
     def test_body_length_is_measured_as_utf8_bytes(self) -> None:
         stream = io.BytesIO()
 

@@ -6,6 +6,8 @@ from typing import BinaryIO, cast
 
 JsonValue = object
 JsonObject = dict[str, object]
+MAXIMUM_PAYLOAD_LENGTH = 16 * 1024 * 1024
+MAXIMUM_HEADER_LINE_LENGTH = 8 * 1024
 
 
 def write_message(stream: BinaryIO, message: Mapping[str, JsonValue]) -> None:
@@ -27,20 +29,22 @@ def read_message(stream: BinaryIO) -> JsonObject:
         EOFError: If the adapter closes the stream.
         ValueError: If framing or JSON is invalid.
     """
-    headers: dict[str, str] = {}
+    raw_length: str | None = None
     while True:
-        line = stream.readline()
+        line = stream.readline(MAXIMUM_HEADER_LINE_LENGTH + 1)
         if not line:
             raise EOFError("DAP stream closed while reading headers")
+        if len(line) > MAXIMUM_HEADER_LINE_LENGTH:
+            raise ValueError("DAP header line exceeds the 8192-byte limit")
         if line == b"\r\n":
             break
         try:
             name, value = line.decode("ascii").split(":", maxsplit=1)
         except (UnicodeDecodeError, ValueError) as error:
             raise ValueError("Invalid DAP header") from error
-        headers[name.lower()] = value.strip()
+        if name.lower() == "content-length":
+            raw_length = value.strip()
 
-    raw_length = headers.get("content-length")
     if raw_length is None:
         raise ValueError("DAP header is missing Content-Length")
     try:
@@ -49,6 +53,10 @@ def read_message(stream: BinaryIO) -> JsonObject:
         raise ValueError("DAP Content-Length is invalid") from error
     if length < 0:
         raise ValueError("DAP Content-Length is invalid")
+    if length > MAXIMUM_PAYLOAD_LENGTH:
+        raise ValueError(
+            f"DAP Content-Length exceeds the {MAXIMUM_PAYLOAD_LENGTH}-byte limit"
+        )
 
     body = stream.read(length)
     if len(body) != length:
