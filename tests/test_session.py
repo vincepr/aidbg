@@ -6,17 +6,91 @@ import time
 from typing import cast
 import unittest
 
+from aidbg.client import DapRequestError
 from aidbg.commands import Breakpoint
 from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
 from aidbg.session import (
     DebugSession,
-    InvalidVariableReferenceError,
     SessionTerminatedError,
 )
 
 
 class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_breakpoint_changed_event_updates_binding(self) -> None:
+        profile = AdapterProfile(
+            adapter_id="fake",
+            command_candidates=(sys.executable,),
+            arguments=(
+                str(Path(__file__).with_name("fake_adapter.py")),
+                "0",
+                "Fixture.cs",
+                "changed",
+            ),
+            initialize={"adapterID": "fake"},
+            launch_defaults={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = await DebugSession.create(profile, Path(directory))
+            try:
+                await session.add_breakpoint(Breakpoint(Path("Fixture.cs"), 26))
+
+                stopped = await session.launch(
+                    Path("fixture.dll"),
+                    Path.cwd(),
+                    [],
+                )
+
+                expected = [
+                    {
+                        "path": str(Path("Fixture.cs").resolve()),
+                        "line": 27,
+                        "verified": True,
+                        "id": 1,
+                    }
+                ]
+                self.assertEqual(expected, stopped["breakpointBindings"])
+                self.assertEqual(
+                    expected,
+                    session.status()["breakpointBindings"],
+                )
+            finally:
+                await session.close()
+
+    async def test_breakpoint_removed_event_marks_binding(self) -> None:
+        profile = AdapterProfile(
+            adapter_id="fake",
+            command_candidates=(sys.executable,),
+            arguments=(
+                str(Path(__file__).with_name("fake_adapter.py")),
+                "0",
+                "Fixture.cs",
+                "removed",
+            ),
+            initialize={"adapterID": "fake"},
+            launch_defaults={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = await DebugSession.create(profile, Path(directory))
+            try:
+                await session.add_breakpoint(Breakpoint(Path("Fixture.cs"), 26))
+
+                stopped = await session.launch(
+                    Path("fixture.dll"),
+                    Path.cwd(),
+                    [],
+                )
+
+                binding = cast(
+                    list[dict[str, object]],
+                    stopped["breakpointBindings"],
+                )[0]
+                self.assertFalse(binding["verified"])
+                self.assertTrue(binding["removed"])
+                self.assertNotIn("message", binding)
+            finally:
+                await session.close()
+
     async def test_launch_surfaces_unverified_breakpoint_binding(self) -> None:
         profile = AdapterProfile(
             adapter_id="fake",
@@ -185,7 +259,7 @@ class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await session.close()
 
-    async def test_invalid_variable_reference_has_stop_scoped_guidance(self) -> None:
+    async def test_failed_variables_preserves_adapter_error(self) -> None:
         profile = AdapterProfile(
             adapter_id="fake",
             command_candidates=(sys.executable,),
@@ -203,8 +277,8 @@ class DebugSessionTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with self.assertRaisesRegex(
-                    InvalidVariableReferenceError,
-                    "stop 1.*Run locals or scopes again",
+                    DapRequestError,
+                    "variables: 0x80004005",
                 ):
                     await session.variables(999)
 

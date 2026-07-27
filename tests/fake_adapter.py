@@ -13,6 +13,7 @@ pending_launch: JsonObject | None = None
 continue_delay = float(sys.argv[1]) if len(sys.argv) > 1 else 0
 source_path = sys.argv[2] if len(sys.argv) > 2 else "Fixture.cs"
 breakpoint_mode = sys.argv[3] if len(sys.argv) > 3 else "verified"
+breakpoint_events: list[JsonObject] = []
 
 
 def send(message: JsonObject) -> None:
@@ -49,11 +50,33 @@ while True:
             if isinstance(arguments, dict)
             else None
         )
-        lines = [
-            item.get("line")
-            for item in requested
-            if isinstance(item, dict) and isinstance(item.get("line"), int)
-        ] if isinstance(requested, list) else []
+        lines: list[int] = []
+        if isinstance(requested, list):
+            for item in requested:
+                line = item.get("line") if isinstance(item, dict) else None
+                if isinstance(line, int):
+                    lines.append(line)
+        source = (
+            arguments.get("source")
+            if isinstance(arguments, dict)
+            else None
+        )
+        breakpoint_ids: list[int] = []
+        if breakpoint_mode in {"changed", "removed"}:
+            for line in lines:
+                breakpoint_id = len(breakpoint_events) + 1
+                breakpoint_ids.append(breakpoint_id)
+                breakpoint_events.append(
+                    {
+                        "reason": breakpoint_mode,
+                        "breakpoint": {
+                            "verified": breakpoint_mode == "changed",
+                            "id": breakpoint_id,
+                            "line": line + 1,
+                            "source": source if isinstance(source, dict) else {},
+                        },
+                    }
+                )
         respond(
             request,
             {
@@ -66,8 +89,13 @@ while True:
                             if breakpoint_mode != "verified"
                             else {}
                         ),
+                        **(
+                            {"id": breakpoint_ids[index]}
+                            if breakpoint_mode in {"changed", "removed"}
+                            else {}
+                        ),
                     }
-                    for line in lines
+                    for index, line in enumerate(lines)
                 ]
             },
         )
@@ -79,6 +107,14 @@ while True:
             raise RuntimeError("configurationDone before launch")
         respond(pending_launch)
         pending_launch = None
+        for breakpoint_event in breakpoint_events:
+            send(
+                {
+                    "type": "event",
+                    "event": "breakpoint",
+                    "body": breakpoint_event,
+                }
+            )
         send(
             {
                 "type": "event",

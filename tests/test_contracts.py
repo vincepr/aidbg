@@ -23,8 +23,28 @@ class RepositoryContractTests(unittest.TestCase):
             "references expire",
             "cleanup receipt",
             "references/setup.md",
+            "`variables` expansion and `eval` can execute target code",
+            "fresh, isolated process for each target or build variant",
+            "references/netcoredbg.md",
         ):
             self.assertIn(required, skill)
+
+    def test_netcoredbg_reference_keeps_adapter_details_optional(self) -> None:
+        reference = (
+            ROOT
+            / "skills"
+            / "aidbg-debug"
+            / "references"
+            / "netcoredbg.md"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "symbolStatus",
+            "Source Link",
+            "interpolation",
+            "object creation",
+        ):
+            self.assertIn(required, reference)
 
     def test_setup_pins_limits_and_parallel_session_isolation(self) -> None:
         setup = (

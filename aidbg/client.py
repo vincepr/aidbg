@@ -1,7 +1,7 @@
 """Persistent DAP process client."""
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from concurrent.futures import Future
 import json
 from pathlib import Path
@@ -158,8 +158,9 @@ class DapClient:
         self,
         names: Collection[str],
         timeout: float | None = None,
+        on_event: Callable[[JsonObject], None] | None = None,
     ) -> JsonObject:
-        """Wait for the next event matching one of ``names``."""
+        """Wait for a named event and pass every dequeued event to ``on_event``."""
         effective_timeout = timeout or self._limits.request_seconds
         deadline = time.monotonic() + effective_timeout
         while True:
@@ -176,6 +177,8 @@ class DapClient:
                 ) from error
             if isinstance(value, BaseException):
                 raise value
+            if on_event is not None:
+                on_event(value)
             if value.get("event") in names:
                 return value
 

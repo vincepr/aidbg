@@ -228,7 +228,7 @@ class CliTests(unittest.TestCase):
             self.assertIn('"frames":[', result.stdout)
             self.assertIn('"startLine":22', result.stdout)
 
-    def test_variable_reference_error_includes_stop_context(self) -> None:
+    def test_variables_error_preserves_adapter_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory, "fake.json")
             profile.write_text(
@@ -264,10 +264,10 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertIn('"error":"invalid_variable_reference"', result.stdout)
-            self.assertIn('"stopId":1', result.stdout)
+            self.assertIn('"error":"DapRequestError"', result.stdout)
+            self.assertIn("variables: 0x80004005", result.stdout)
             self.assertIn('"stopId":1,"variables":[', result.stdout)
-            self.assertIn("Run locals or scopes again", result.stdout)
+            self.assertNotIn("may belong to an earlier stop", result.stdout)
 
     def test_variables_can_be_written_without_returning_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

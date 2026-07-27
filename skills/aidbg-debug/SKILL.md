@@ -5,7 +5,7 @@ description: Debug runtime failures through the compact, debugger-independent ai
 
 # aidbg Debug
 
-Run one isolated session per agent:
+Run a fresh, isolated process for each target or build variant and agent:
 
 ```powershell
 python -m aidbg.cli --profile adapters/netcoredbg.json
@@ -28,10 +28,11 @@ context and `--output` for data that should not enter model context.
 
 DAP frame and variable references expire on `continue` or `next`; reacquire
 them from the new stop. A wait timeout leaves the target running; call `wait`
-again or `stop`. Prefer direct property/index evaluation when an adapter rejects
-lambdas or method-heavy expressions.
+again or `stop`. `variables` expansion and `eval` can execute target code,
+including getters; inspect backing fields or counters first.
 
 Stop once runtime evidence distinguishes the root cause. Run `stop`, then
 `quit`; verify the cleanup receipt. Full DAP traffic and errors remain in the
 reported trace directory. Read [setup.md](references/setup.md) only when the
-adapter or prerequisites are unavailable.
+adapter or prerequisites are unavailable. For NetCoreDbg-specific symbol or
+evaluator failures, read [netcoredbg.md](references/netcoredbg.md).

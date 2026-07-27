@@ -15,7 +15,7 @@ from aidbg.commands import parse_break_command, tokenize
 from aidbg.lifecycle import SessionLimits
 from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject, JsonValue
-from aidbg.session import DebugSession, InvalidVariableReferenceError
+from aidbg.session import DebugSession
 
 
 DEFAULT_SESSION_TIMEOUT_SECONDS = 24 * 60 * 60
@@ -82,8 +82,6 @@ async def run(
                     "message": str(error),
                     "traceDirectory": str(trace_directory.resolve()),
                 }
-                if isinstance(error, InvalidVariableReferenceError):
-                    payload["stopId"] = session.status()["stopId"]
                 emit(payload)
     finally:
         lease.cancel()

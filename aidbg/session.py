@@ -10,12 +10,6 @@ from aidbg.profile import AdapterProfile
 from aidbg.protocol import JsonObject
 
 
-class InvalidVariableReferenceError(RuntimeError):
-    """A variable reference rejected by the adapter at the current stop."""
-
-    code = "invalid_variable_reference"
-
-
 class SessionTerminatedError(RuntimeError):
     """A command tried to reuse a completed adapter session."""
 
@@ -113,7 +107,10 @@ class DebugSession:
             }
         )
         launch_response = self._client.send_request("launch", launch_arguments)
-        await self._client.wait_event({"initialized"})
+        await self._client.wait_event(
+            {"initialized"},
+            on_event=self._handle_event,
+        )
         for file in dict.fromkeys(item.file for item in self._breakpoints):
             await self._sync_breakpoints(file)
         await self._client.request("setExceptionBreakpoints", {"filters": []})
@@ -189,21 +186,14 @@ class DebugSession:
     ) -> list[JsonObject]:
         """Return a bounded page of variables."""
         self._require_stopped()
-        try:
-            response = await self._client.request(
-                "variables",
-                {
-                    "variablesReference": reference,
-                    "start": 0,
-                    "count": count,
-                },
-            )
-        except DapRequestError as error:
-            raise InvalidVariableReferenceError(
-                f"variable reference {reference} was rejected at stop "
-                f"{self._stop_id}; it may belong to an earlier stop. "
-                "Run locals or scopes again after every continue or step."
-            ) from error
+        response = await self._client.request(
+            "variables",
+            {
+                "variablesReference": reference,
+                "start": 0,
+                "count": count,
+            },
+        )
         return _body_objects(response, "variables")[:count]
 
     async def locals(
@@ -365,6 +355,38 @@ class DebugSession:
             for binding in file_bindings
         ]
 
+    def _handle_event(self, event: JsonObject) -> None:
+        if event.get("event") != "breakpoint":
+            return
+        body = event.get("body")
+        if not isinstance(body, dict):
+            return
+        breakpoint = body.get("breakpoint")
+        if not isinstance(breakpoint, dict):
+            return
+        breakpoint_id = breakpoint.get("id")
+        if not isinstance(breakpoint_id, int):
+            return
+        for binding in self._all_breakpoint_bindings():
+            if binding.get("id") != breakpoint_id:
+                continue
+            binding["verified"] = breakpoint.get("verified")
+            if body.get("reason") == "removed":
+                binding["removed"] = True
+            else:
+                binding.pop("removed", None)
+            for name in ("line", "message"):
+                value = breakpoint.get(name)
+                if isinstance(value, (int, str)):
+                    binding[name] = value
+                else:
+                    binding.pop(name, None)
+            source = breakpoint.get("source")
+            path = source.get("path") if isinstance(source, dict) else None
+            if isinstance(path, str):
+                binding["path"] = path
+            return
+
     async def _wait_execution(
         self,
         wait_seconds: float | None = None,
@@ -373,6 +395,7 @@ class DebugSession:
             message = await self._client.wait_event(
                 {"stopped", "terminated", "exited"},
                 timeout=wait_seconds or self._limits.execution_seconds,
+                on_event=self._handle_event,
             )
         except TimeoutError:
             return {
